@@ -1,5 +1,6 @@
 import logging
 import os
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -186,6 +187,10 @@ def main() -> None:
         level=os.getenv("LOG_LEVEL", "INFO"),
         format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
     )
+
+    if "--once" in sys.argv:
+        run_briefing_job()
+        return
 
     schedule.every().day.at("07:30").do(run_briefing_job)
     logger.info("아침 브리핑 스케줄러 시작")
