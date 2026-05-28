@@ -1,6 +1,13 @@
 import logging
 import json
 import os
+import re
+import smtplib
+from email.header import Header
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.utils import formataddr
+from html import escape
 from typing import Any, Dict, List, Optional, Set
 
 import requests
@@ -20,6 +27,8 @@ DEFAULT_HEADERS = {
 
 OPENWEATHERMAP_URL = "https://api.openweathermap.org/data/2.5/weather"
 KAKAO_MEMO_SEND_URL = "https://kapi.kakao.com/v2/api/talk/memo/default/send"
+GMAIL_SMTP_HOST = "smtp.gmail.com"
+GMAIL_SMTP_PORT = 465
 DEFAULT_OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 BRIEFING_SYSTEM_PROMPT = (
     "당신은 유능하고 친절한 개인 AI 비서입니다. 입력받은 뉴스 헤드라인 5개와 "
@@ -268,6 +277,138 @@ def send_kakao_message(access_token: str, text: str) -> bool:
         response_text = getattr(exc.response, "text", "") if exc.response else ""
         logger.exception("카카오 메시지 전송 실패: %s %s", exc, response_text)
         return False
+
+
+def _basic_markdown_to_html(content: str) -> str:
+    """메일 본문용으로 제목, 목록, 링크 정도만 간단히 HTML로 변환합니다."""
+    html_parts: List[str] = []
+    in_list = False
+    link_pattern = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
+
+    def convert_inline(text: str) -> str:
+        escaped = escape(text)
+        return link_pattern.sub(
+            r'<a href="\2" style="color:#2563eb;text-decoration:none;">\1</a>',
+            escaped,
+        )
+
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+
+        if not line:
+            if in_list:
+                html_parts.append("</ul>")
+                in_list = False
+            continue
+
+        if line.startswith("## "):
+            if in_list:
+                html_parts.append("</ul>")
+                in_list = False
+            html_parts.append(
+                f'<h2 style="font-size:18px;margin:24px 0 10px;color:#111827;">'
+                f"{convert_inline(line[3:])}</h2>"
+            )
+        elif line.startswith("# "):
+            if in_list:
+                html_parts.append("</ul>")
+                in_list = False
+            html_parts.append(
+                f'<h1 style="font-size:24px;margin:0 0 18px;color:#111827;">'
+                f"{convert_inline(line[2:])}</h1>"
+            )
+        elif line.startswith(("- ", "* ")):
+            if not in_list:
+                html_parts.append('<ul style="padding-left:22px;margin:10px 0;">')
+                in_list = True
+            html_parts.append(
+                f'<li style="margin:6px 0;line-height:1.6;">'
+                f"{convert_inline(line[2:])}</li>"
+            )
+        else:
+            if in_list:
+                html_parts.append("</ul>")
+                in_list = False
+            html_parts.append(
+                f'<p style="margin:10px 0;line-height:1.7;">'
+                f"{convert_inline(line)}</p>"
+            )
+
+    if in_list:
+        html_parts.append("</ul>")
+
+    return "\n".join(html_parts)
+
+
+def _build_email_html(content: str) -> str:
+    body_html = _basic_markdown_to_html(content)
+    return f"""<!doctype html>
+<html lang="ko">
+  <body style="margin:0;padding:0;background:#f3f4f6;">
+    <div style="max-width:680px;margin:0 auto;padding:28px 16px;">
+      <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:8px;padding:28px;font-family:Arial,'Apple SD Gothic Neo','Malgun Gothic',sans-serif;color:#374151;">
+        {body_html}
+      </div>
+    </div>
+  </body>
+</html>"""
+
+
+def send_briefing_email(
+    to_emails: List[str],
+    subject: str,
+    content: str,
+) -> Dict[str, bool]:
+    """Gmail SMTP로 여러 수신자에게 아침 브리핑 메일을 개별 발송합니다.
+
+    Gmail 계정과 앱 비밀번호는 소스코드에 직접 쓰지 말고 .env의
+    GMAIL_ADDRESS, GMAIL_APP_PASSWORD 환경변수로 관리하세요.
+    """
+    gmail_address = os.getenv("GMAIL_ADDRESS")
+    gmail_app_password = os.getenv("GMAIL_APP_PASSWORD")
+
+    if not gmail_address or not gmail_app_password:
+        logger.error("GMAIL_ADDRESS 또는 GMAIL_APP_PASSWORD 환경변수가 없습니다.")
+        return {email: False for email in to_emails}
+    if not to_emails:
+        logger.error("메일 수신자 목록이 비어 있습니다.")
+        return {}
+    if not subject or not content:
+        logger.error("메일 제목 또는 본문이 비어 있습니다.")
+        return {email: False for email in to_emails}
+
+    html_content = _build_email_html(content)
+    plain_content = content
+    results: Dict[str, bool] = {}
+
+    try:
+        with smtplib.SMTP_SSL(GMAIL_SMTP_HOST, GMAIL_SMTP_PORT, timeout=15) as smtp:
+            smtp.login(gmail_address, gmail_app_password)
+
+            for to_email in to_emails:
+                try:
+                    message = MIMEMultipart("alternative")
+                    message["Subject"] = str(Header(subject, "utf-8"))
+                    message["From"] = formataddr(("Morning Briefing", gmail_address))
+                    message["To"] = to_email
+
+                    message.attach(MIMEText(plain_content, "plain", "utf-8"))
+                    message.attach(MIMEText(html_content, "html", "utf-8"))
+
+                    smtp.sendmail(gmail_address, [to_email], message.as_string())
+                    results[to_email] = True
+                    logger.info("브리핑 메일 발송 완료: %s", to_email)
+                except Exception as exc:
+                    results[to_email] = False
+                    logger.exception("브리핑 메일 발송 실패: %s %s", to_email, exc)
+    except smtplib.SMTPException as exc:
+        logger.exception("Gmail SMTP 연결 또는 인증 실패: %s", exc)
+        return {email: False for email in to_emails}
+    except OSError as exc:
+        logger.exception("Gmail SMTP 네트워크 오류: %s", exc)
+        return {email: False for email in to_emails}
+
+    return results
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ Python을 사용해 매일 아침 브리핑에 필요한 뉴스와 날씨 데이
 - OpenWeatherMap API를 활용한 지역별 현재 날씨 조회
 - OpenAI API를 활용한 아침 브리핑 문장 생성
 - 카카오톡 '나에게 보내기' API를 활용한 브리핑 발송
+- Gmail SMTP를 활용한 여러 수신자 대상 브리핑 메일 발송
 - GitHub Actions를 활용한 매일 오전 7시 30분 자동 실행
 - requests와 BeautifulSoup을 활용한 HTML 파싱
 - API 요청 및 크롤링 실패 시 예외 처리
@@ -21,6 +22,7 @@ Python을 사용해 매일 아침 브리핑에 필요한 뉴스와 날씨 데이
 - OpenAI API
 - OpenWeatherMap API
 - Kakao Talk Message API
+- Gmail SMTP
 - GitHub Actions
 - schedule
 - logging
@@ -53,6 +55,9 @@ KAKAO_REST_API_KEY=your_kakao_rest_api_key
 KAKAO_CLIENT_SECRET=
 KAKAO_ACCESS_TOKEN=your_kakao_access_token
 KAKAO_REFRESH_TOKEN=your_kakao_refresh_token
+
+GMAIL_ADDRESS=your_gmail_address@gmail.com
+GMAIL_APP_PASSWORD=your_gmail_app_password
 ```
 
 ## GitHub Actions 자동 실행
