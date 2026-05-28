@@ -4,15 +4,13 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
+from typing import List
 
-import requests
 import schedule
 
 
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"
-KAKAO_TOKEN_URL = "https://kauth.kakao.com/oauth/token"
 
 logger = logging.getLogger(__name__)
 
@@ -39,128 +37,81 @@ def load_env_file(env_path: Path = ENV_PATH) -> None:
         logger.exception(".env 파일 읽기 실패: %s", exc)
 
 
-def update_env_file(updates: Dict[str, str], env_path: Path = ENV_PATH) -> None:
-    """갱신된 access_token 등을 .env에 반영합니다."""
-    try:
-        lines = []
-        existing_keys = set()
+def configure_timezone() -> None:
+    """서버 시간이 UTC여도 한국 시간 기준 스케줄이 동작하도록 TZ를 설정합니다."""
+    timezone = os.getenv("APP_TIMEZONE", "Asia/Seoul")
+    os.environ["TZ"] = timezone
 
-        if env_path.exists():
-            lines = env_path.read_text(encoding="utf-8").splitlines()
-
-        updated_lines = []
-        for line in lines:
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#") or "=" not in stripped:
-                updated_lines.append(line)
-                continue
-
-            key = stripped.split("=", 1)[0].strip()
-            if key in updates:
-                updated_lines.append(f"{key}={updates[key]}")
-                existing_keys.add(key)
-            else:
-                updated_lines.append(line)
-
-        for key, value in updates.items():
-            if key not in existing_keys:
-                updated_lines.append(f"{key}={value}")
-
-        env_path.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
-    except OSError as exc:
-        logger.exception(".env 파일 업데이트 실패: %s", exc)
+    if hasattr(time, "tzset"):
+        time.tzset()
 
 
-def refresh_kakao_token(refresh_token: str) -> Optional[str]:
-    """카카오 Refresh Token으로 새 access_token을 발급받는 예시 구조입니다."""
-    rest_api_key = os.getenv("KAKAO_REST_API_KEY")
-    client_secret = os.getenv("KAKAO_CLIENT_SECRET")
-
-    if not rest_api_key:
-        logger.error("KAKAO_REST_API_KEY가 없습니다.")
-        return None
-    if not refresh_token:
-        logger.error("KAKAO_REFRESH_TOKEN이 없습니다.")
-        return None
-
-    data = {
-        "grant_type": "refresh_token",
-        "client_id": rest_api_key,
-        "refresh_token": refresh_token,
-    }
-    if client_secret:
-        data["client_secret"] = client_secret
-
-    try:
-        response = requests.post(KAKAO_TOKEN_URL, data=data, timeout=10)
-        response.raise_for_status()
-        token_data = response.json()
-    except requests.RequestException as exc:
-        response_text = getattr(exc.response, "text", "") if exc.response else ""
-        logger.exception("카카오 토큰 갱신 요청 실패: %s %s", exc, response_text)
-        return None
-    except ValueError as exc:
-        logger.exception("카카오 토큰 응답 JSON 파싱 실패: %s", exc)
-        return None
-
-    access_token = token_data.get("access_token")
-    new_refresh_token = token_data.get("refresh_token")
-
-    if not access_token:
-        logger.error("카카오 토큰 응답에 access_token이 없습니다: %s", token_data)
-        return None
-
-    updates = {"KAKAO_ACCESS_TOKEN": access_token}
-    os.environ["KAKAO_ACCESS_TOKEN"] = access_token
-
-    if new_refresh_token:
-        updates["KAKAO_REFRESH_TOKEN"] = new_refresh_token
-        os.environ["KAKAO_REFRESH_TOKEN"] = new_refresh_token
-
-    update_env_file(updates)
-    logger.info("카카오 access_token 갱신 완료")
-    return access_token
+def parse_email_recipients() -> List[str]:
+    raw_recipients = os.getenv("EMAIL_RECIPIENTS", "")
+    return [
+        email.strip()
+        for email in raw_recipients.split(",")
+        if email.strip()
+    ]
 
 
 def run_briefing_job() -> None:
-    """뉴스/날씨 수집, OpenAI 요약, 카카오톡 발송을 한 번 실행합니다."""
+    """뉴스/날씨 수집, OpenAI 요약, 이메일 단체 발송을 한 번 실행합니다."""
+    location = os.getenv("BRIEFING_LOCATION", "서울")
+    recipients = parse_email_recipients()
+    subject = os.getenv("EMAIL_SUBJECT", "오늘의 아침 브리핑")
+
+    logger.info("아침 브리핑 작업 시작: location=%s", location)
+
     try:
         from morning_briefing_data import (
             generate_briefing,
             get_naver_news,
             get_weather_info,
-            send_kakao_message,
+            send_briefing_email,
         )
-
-        location = os.getenv("BRIEFING_LOCATION", "서울")
-        logger.info("아침 브리핑 작업 시작: location=%s", location)
-
-        news_list = get_naver_news()
-        weather_data = get_weather_info(location)
-        briefing_text = generate_briefing(news_list, weather_data)
-
-        if not briefing_text:
-            logger.error("브리핑 문장 생성 실패로 카카오톡 발송을 건너뜁니다.")
-            return
-
-        access_token = os.getenv("KAKAO_ACCESS_TOKEN")
-        refresh_token = os.getenv("KAKAO_REFRESH_TOKEN")
-
-        refreshed_token = refresh_kakao_token(refresh_token) if refresh_token else None
-        if refreshed_token:
-            access_token = refreshed_token
-
-        if not access_token:
-            logger.error("사용 가능한 카카오 access_token이 없어 발송할 수 없습니다.")
-            return
-
-        sent = send_kakao_message(access_token, briefing_text)
-        if sent:
-            logger.info("카카오톡 브리핑 발송 완료")
-        else:
-            logger.error("카카오톡 브리핑 발송 실패")
     except Exception as exc:
-        logger.exception("브리핑 작업 중 처리되지 않은 오류: %s", exc)
+        logger.exception("브리핑 모듈 불러오기 실패: %s", exc)
+        return
+
+    try:
+        news_list = get_naver_news()
+        logger.info("뉴스 수집 완료: %s개", len(news_list))
+    except Exception as exc:
+        logger.exception("뉴스 수집 단계 실패. 빈 뉴스 목록으로 계속 진행합니다: %s", exc)
+        news_list = []
+
+    try:
+        weather_data = get_weather_info(location)
+        if weather_data:
+            logger.info("날씨 수집 완료: %s", weather_data.get("location", location))
+        else:
+            logger.warning("날씨 수집 결과가 없습니다.")
+    except Exception as exc:
+        logger.exception("날씨 수집 단계 실패. 날씨 정보 없이 계속 진행합니다: %s", exc)
+        weather_data = None
+
+    try:
+        briefing_text = generate_briefing(news_list, weather_data)
+        if not briefing_text:
+            logger.error("브리핑 문장 생성 실패로 이메일 발송을 건너뜁니다.")
+            return
+        logger.info("OpenAI 브리핑 생성 완료")
+    except Exception as exc:
+        logger.exception("OpenAI 브리핑 생성 단계 실패: %s", exc)
+        return
+
+    if not recipients:
+        logger.error("EMAIL_RECIPIENTS가 비어 있어 이메일 발송을 건너뜁니다.")
+        return
+
+    try:
+        results = send_briefing_email(recipients, subject, briefing_text)
+        success_count = sum(1 for sent in results.values() if sent)
+        fail_count = len(results) - success_count
+        logger.info("이메일 발송 완료: 성공=%s 실패=%s", success_count, fail_count)
+    except Exception as exc:
+        logger.exception("이메일 발송 단계 실패: %s", exc)
 
 
 def format_next_run() -> str:
@@ -183,6 +134,7 @@ def format_next_run() -> str:
 
 def main() -> None:
     load_env_file()
+    configure_timezone()
     logging.basicConfig(
         level=os.getenv("LOG_LEVEL", "INFO"),
         format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
@@ -192,8 +144,9 @@ def main() -> None:
         run_briefing_job()
         return
 
-    schedule.every().day.at("07:30").do(run_briefing_job)
-    logger.info("아침 브리핑 스케줄러 시작")
+    run_time = os.getenv("BRIEFING_RUN_TIME", "07:30")
+    schedule.every().day.at(run_time).do(run_briefing_job)
+    logger.info("아침 브리핑 스케줄러 시작: 매일 %s", run_time)
     logger.info(format_next_run())
 
     log_interval = int(os.getenv("STATUS_LOG_INTERVAL_SECONDS", "60"))
