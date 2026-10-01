@@ -136,7 +136,22 @@ def get_weather_info(location: str) -> Optional[Dict[str, Any]]:
         response.raise_for_status()
         data = response.json()
     except requests.RequestException as exc:
-        logger.exception("%s 날씨 요청 실패: %s", location, exc)
+        status_code = exc.response.status_code if exc.response is not None else "N/A"
+        api_message = "응답 메시지 없음"
+
+        if exc.response is not None:
+            try:
+                api_message = exc.response.json().get("message", api_message)
+            except ValueError:
+                pass
+
+        logger.error(
+            "%s 날씨 요청 실패: status=%s, type=%s, message=%s",
+            location,
+            status_code,
+            type(exc).__name__,
+            api_message,
+        )
         return None
     except ValueError as exc:
         logger.exception("%s 날씨 응답 JSON 파싱 실패: %s", location, exc)
@@ -382,7 +397,12 @@ def send_briefing_email(
     results: Dict[str, bool] = {}
 
     try:
-        with smtplib.SMTP_SSL(GMAIL_SMTP_HOST, GMAIL_SMTP_PORT, timeout=15) as smtp:
+        with smtplib.SMTP_SSL(
+            GMAIL_SMTP_HOST,
+            GMAIL_SMTP_PORT,
+            local_hostname="localhost",
+            timeout=15,
+        ) as smtp:
             smtp.login(gmail_address, gmail_app_password)
 
             for to_email in to_emails:
